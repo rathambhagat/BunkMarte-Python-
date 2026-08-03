@@ -4,7 +4,7 @@ name: Build BunkMarte APK
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [master]
 
 jobs:
   build-apk:
