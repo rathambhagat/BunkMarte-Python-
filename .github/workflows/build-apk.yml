@@ -22,9 +22,7 @@ jobs:
         run: pip install flet
 
       - name: Build Android APK
-        # This uses Flet's own build pipeline (Flutter under the hood) -
-        # no Java/Kotlin code is written by us; Flet generates the wrapper.
-        run: flet build apk --project "BunkMarte"
+        run: yes | flet build apk --project "BunkMarte"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
