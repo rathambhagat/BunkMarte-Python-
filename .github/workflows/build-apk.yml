@@ -1,0 +1,33 @@
+name: Build BunkMarte APK
+
+# Trigger manually from the Actions tab, or on every push to main.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Flet CLI
+        run: pip install flet
+
+      - name: Build Android APK
+        # This uses Flet's own build pipeline (Flutter under the hood) -
+        # no Java/Kotlin code is written by us; Flet generates the wrapper.
+        run: flet build apk --project "BunkMarte"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bunkmarte-apk
+          path: build/apk/*.apk
