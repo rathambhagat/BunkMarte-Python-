@@ -137,6 +137,15 @@ TIMETABLE = {
 # whether attendance was actually logged for it.
 HISTORY_START_DATE = dt.date(2026, 7, 1)
 
+# Every subject a professor could swap a slot into, shown in the "Swap Class"
+# dialog. Labs are listed as distinct entries (LAB:DAA / LAB:AI / LAB:PE)
+# since a swapped-in lab is treated as its own subject bucket for attendance
+# math and history, separate from the plain (non-lab) version of that class.
+SWAP_SUBJECT_OPTIONS = [
+    "FML", "MDM", "DAA", "TFCS", "AI", "PE", "OE",
+    "LAB:DAA", "LAB:AI", "LAB:PE",
+]
+
 
 # ---------------------------------------------------------------------------
 # 4. DATABASE LAYER
@@ -172,6 +181,27 @@ def init_db():
         ON attendance(date, time_slot, subject)
         """
     )
+
+    # Tracks "Swap Class" overrides: when a professor swaps what happens in
+    # a given time slot, this records which subject *actually* occupied that
+    # slot on that date, without touching the base TIMETABLE at all.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS swaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,             -- ISO date
+            time_slot TEXT NOT NULL,        -- e.g. 10:00-12:00
+            original_subject TEXT NOT NULL, -- what TIMETABLE says
+            new_subject TEXT NOT NULL       -- what's actually happening
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_swap
+        ON swaps(date, time_slot)
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -202,6 +232,64 @@ def get_record(date_str, time_slot, subject):
     ).fetchone()
     conn.close()
     return row
+
+
+# ---------------------------------------------------------------------------
+# 4b. CLASS SWAPPING
+# ---------------------------------------------------------------------------
+def get_swap(date_str, time_slot):
+    """Return the swap row for this exact date/time_slot, or None if the
+    timetable's default subject is still in effect for that slot."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM swaps WHERE date=? AND time_slot=?",
+        (date_str, time_slot),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def set_swap(date_str, time_slot, original_subject, new_subject):
+    """Record that `time_slot` on `date_str` actually ran `new_subject`
+    instead of the timetable's `original_subject`.
+
+    Picking the original subject again simply removes the swap (reverts to
+    the default timetable). Any attendance already logged under the
+    ORIGINAL subject for this exact slot is cleared out at the same time -
+    that class didn't happen under the original subject anymore, so keeping
+    a stale record there would double-count it. Log your status again under
+    the new subject after swapping.
+    """
+    conn = get_conn()
+    if new_subject == original_subject:
+        conn.execute(
+            "DELETE FROM swaps WHERE date=? AND time_slot=?",
+            (date_str, time_slot),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO swaps (date, time_slot, original_subject, new_subject)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(date, time_slot)
+            DO UPDATE SET new_subject = excluded.new_subject,
+                          original_subject = excluded.original_subject
+            """,
+            (date_str, time_slot, original_subject, new_subject),
+        )
+        conn.execute(
+            "DELETE FROM attendance WHERE date=? AND time_slot=? AND subject=?",
+            (date_str, time_slot, original_subject),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_effective_subject(date_str, time_slot, original_subject):
+    """What's actually happening in this slot right now: the swapped-in
+    subject if one was set, otherwise the timetable's default subject."""
+    swap = get_swap(date_str, time_slot)
+    return swap["new_subject"] if swap else original_subject
 
 
 def delete_record(record_id):
