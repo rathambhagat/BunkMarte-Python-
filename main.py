@@ -634,20 +634,82 @@ def main(page: ft.Page):
                 continue
 
             time_slot = f"{block['start']}-{block['end']}"
-            subject = block["subject"]
-            existing = get_record(date_str, time_slot, subject)
+            original_subject = block["subject"]
+            
+            # --- SWAP LOGIC ---
+            # Fetch the actual subject running (either default or swapped)
+            effective_subject = get_effective_subject(date_str, time_slot, original_subject)
+            is_swapped = effective_subject != original_subject
+
+            existing = get_record(date_str, time_slot, effective_subject)
             status = existing["status"] if existing else None
             chip_color = STATUS_COLORS.get(status, COLOR_SUBTEXT)
 
-            label = subject + (" (Lab)" if block.get("is_lab") else "")
+            label = effective_subject + (" (Lab)" if block.get("is_lab") else "")
+            if is_swapped:
+                label += " (Swapped)"
 
-            def make_click(ts=time_slot, subj=subject, lbl=label):
+            # DIALOG: Swap Class Picker
+            def open_swap_picker(ts=time_slot, orig=original_subject, curr=effective_subject):
+                def choose_swap(new_subj):
+                    def handler(e):
+                        set_swap(date_str, ts, orig, new_subj)
+                        page.pop_dialog()
+                        refresh_body()
+                    return handler
+
+                chips = []
+                for s in SWAP_SUBJECT_OPTIONS:
+                    is_active = (s == curr)
+                    color = COLOR_PRIMARY if is_active else COLOR_SUBTEXT
+                    chips.append(
+                        ft.ElevatedButton(
+                            content=("\u2713 " + s) if is_active else s,
+                            on_click=choose_swap(s),
+                            style=ft.ButtonStyle(
+                                bgcolor=ft.Colors.with_opacity(0.3 if is_active else 0.1, color),
+                                color=color,
+                                shape=ft.RoundedRectangleBorder(radius=12),
+                            ),
+                        )
+                    )
+
+                dialog = ft.AlertDialog(
+                    modal=True,
+                    bgcolor=COLOR_SURFACE,
+                    title=ft.Text(f"Swap Class", color=COLOR_TEXT, size=18, weight=ft.FontWeight.BOLD),
+                    content=ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Text(f"Change {orig} to:", color=COLOR_SUBTEXT, size=12),
+                                ft.Row(chips, wrap=True, spacing=8, run_spacing=8),
+                            ],
+                            tight=True,
+                            spacing=10
+                        ),
+                        width=340,
+                    ),
+                    actions=[
+                        ft.TextButton(
+                            "Revert to Default" if is_swapped else "Cancel",
+                            on_click=choose_swap(orig) if is_swapped else lambda e: page.pop_dialog(),
+                            style=ft.ButtonStyle(color=STATUS_COLORS["Absent"] if is_swapped else COLOR_SUBTEXT),
+                        )
+                    ],
+                )
+                page.show_dialog(dialog)
+
+            def make_swap_click(ts=time_slot, orig=original_subject, curr=effective_subject):
+                def handler(e):
+                    open_swap_picker(ts, orig, curr)
+                return handler
+
+            def make_click(ts=time_slot, subj=effective_subject, lbl=label):
                 def handler(e):
                     open_status_picker(
                         date_str, day_name, ts, subj, f"{lbl} \u2014 mark status",
                         on_done=refresh_body,
                     )
-
                 return handler
 
             status_pill = (
@@ -672,23 +734,39 @@ def main(page: ft.Page):
                     padding=16,
                     border_radius=18,
                     bgcolor=COLOR_CARD,
-                    border=ft.Border.all(1, COLOR_CARD_BORDER if not status else ft.Colors.with_opacity(0.5, chip_color)),
-                    on_click=make_click(),
+                    border=ft.Border.all(1, COLOR_PRIMARY if is_swapped else (COLOR_CARD_BORDER if not status else ft.Colors.with_opacity(0.5, chip_color))),
                     content=ft.Row(
                         [
-                            ft.Column(
-                                [
-                                    ft.Text(label, size=17, weight=ft.FontWeight.BOLD, color=COLOR_TEXT),
-                                    ft.Text(
-                                        format_slot_label(block["start"], block["end"]),
-                                        size=12,
-                                        color=COLOR_SUBTEXT,
-                                    ),
-                                ],
-                                spacing=3,
+                            # Left side: Subject details (Clickable to mark attendance)
+                            ft.Container(
+                                on_click=make_click(),
+                                content=ft.Column(
+                                    [
+                                        ft.Text(label, size=17, weight=ft.FontWeight.BOLD, color=COLOR_PRIMARY if is_swapped else COLOR_TEXT),
+                                        ft.Text(
+                                            format_slot_label(block["start"], block["end"]),
+                                            size=12,
+                                            color=COLOR_SUBTEXT,
+                                        ),
+                                    ],
+                                    spacing=3,
+                                ),
                                 expand=True,
                             ),
-                            status_pill,
+                            
+                            # Right side: Status Pill + Swap Button
+                            ft.Row(
+                                [
+                                    status_pill,
+                                    ft.IconButton(
+                                        icon=ft.Icons.SWAP_HORIZ,
+                                        icon_color=COLOR_SUBTEXT,
+                                        tooltip="Swap Class",
+                                        on_click=make_swap_click(),
+                                    )
+                                ],
+                                spacing=4,
+                            )
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -701,7 +779,6 @@ def main(page: ft.Page):
             spacing=0,
             expand=True,
         )
-
     # =======================================================================
     # VIEW: SUMMARY
     # =======================================================================
