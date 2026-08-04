@@ -56,6 +56,12 @@ STATUS_COLORS = {
 # Ordered list of statuses as they will appear in the picker dialog.
 STATUS_LIST = list(STATUS_COLORS.keys())
 
+# Grayed-out color for calendar days that were scheduled but never logged
+# ("Unmarked" is a UI-only placeholder status - it is intentionally NOT in
+# STATUS_COLORS/STATUS_LIST above, so it can never be picked as a real status
+# and never gets written to the database).
+UNMARKED_COLOR = "#5A5A66"
+
 # Math rules -> (attended_delta, total_delta) added per logged class.
 # Present / Proxy / Cancelled all count as a "free" attended class.
 # Absent / Bunk / Mass Bunk count against you (total goes up, attended does not).
@@ -125,6 +131,11 @@ TIMETABLE = {
     "Saturday": [],
     "Sunday": [],
 }
+
+# The semester start date. The "ghost calendar" backfill in
+# get_subject_history() scans every day from here up to today, regardless of
+# whether attendance was actually logged for it.
+HISTORY_START_DATE = dt.date(2026, 7, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -220,20 +231,75 @@ def get_all_records():
 
 
 def get_subject_history(subject):
-    """Every class instance ever logged for one subject, in chronological
-    order (oldest first, matching a normal 'diary' reading order)."""
+    """Build the FULL chronological "ghost calendar" for a subject: every
+    single date from HISTORY_START_DATE up to today, oldest first, on which
+    the timetable says this subject was scheduled - not just the dates that
+    were actively logged.
+
+    For each scheduled date/time_slot:
+      - If a real attendance row already exists, that row (as a dict) is
+        used, so its real `id` and logged `status` are returned.
+      - Otherwise a placeholder dict with id=None and status="Unmarked" is
+        returned instead, so the UI can offer to backfill it.
+
+    "Unmarked" placeholders are generated on the fly and never touch the
+    database, so compute_subject_summary() (which reads straight from the
+    attendance table via get_all_records()) automatically ignores them -
+    they can never affect the attendance percentage.
+    """
+    # One query to grab every real record ever logged for this subject, then
+    # look it up in memory while walking the calendar (avoids one DB round
+    # trip per scheduled day).
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM attendance WHERE subject=? ORDER BY date ASC, time_slot ASC",
-        (subject,),
+    existing_rows = conn.execute(
+        "SELECT * FROM attendance WHERE subject=?", (subject,)
     ).fetchall()
     conn.close()
-    return rows
+    existing_lookup = {(row["date"], row["time_slot"]): dict(row) for row in existing_rows}
+
+    history = []
+    current = HISTORY_START_DATE
+    today = dt.date.today()
+
+    while current <= today:
+        day_name = current.strftime("%A")
+        date_str = current.isoformat()
+
+        for block in TIMETABLE.get(day_name, []):
+            if block.get("is_recess"):
+                continue
+            if block["subject"] != subject:
+                continue
+
+            time_slot = f"{block['start']}-{block['end']}"
+            entry = existing_lookup.get((date_str, time_slot))
+            if entry is None:
+                # Scheduled but never logged - a "ghost" placeholder.
+                entry = {
+                    "id": None,
+                    "date": date_str,
+                    "day_name": day_name,
+                    "time_slot": time_slot,
+                    "subject": subject,
+                    "status": "Unmarked",
+                }
+            entry["is_lab"] = block.get("is_lab", False)
+            history.append(entry)
+
+        current += dt.timedelta(days=1)
+
+    return history
 
 
 def compute_subject_summary():
     """Aggregate attended/total per subject across the whole history,
     applying the STATUS_MATH rules. Returns dict: subject -> (attended, total).
+
+    This reads only real rows from the `attendance` table (via
+    get_all_records()), so "Unmarked" ghost-calendar placeholders - which are
+    generated on the fly by get_subject_history() and never written to the
+    database - are automatically excluded (0 attended, 0 total) from the
+    percentage math, exactly as required.
     """
     summary = {}
     for row in get_all_records():
@@ -659,7 +725,11 @@ def main(page: ft.Page):
                     ft.Column(
                         [
                             ft.Text(f"{subject} History", size=22, weight=ft.FontWeight.BOLD, color=COLOR_PRIMARY),
-                            ft.Text("Every class instance, chronologically", size=12, color=COLOR_SUBTEXT),
+                            ft.Text(
+                                f"Since {HISTORY_START_DATE.strftime('%d %b %Y')} \u2022 tap grayed-out days to backfill",
+                                size=12,
+                                color=COLOR_SUBTEXT,
+                            ),
                         ],
                         spacing=2,
                     ),
@@ -668,16 +738,34 @@ def main(page: ft.Page):
             ),
         )
 
+        # The full ghost calendar: real logged rows (id is an int) mixed
+        # with generated "Unmarked" placeholders (id is None) for every
+        # scheduled day since HISTORY_START_DATE that was never logged.
         records = get_subject_history(subject)
 
         entries = []
         for rec in records:
-            color = STATUS_COLORS.get(rec["status"], COLOR_SUBTEXT)
+            is_unmarked = rec["id"] is None
+            color = UNMARKED_COLOR if is_unmarked else STATUS_COLORS.get(rec["status"], COLOR_SUBTEXT)
             start, end = rec["time_slot"].split("-")
+            slot_label = format_slot_label(start, end) + (" \u2022 Lab" if rec.get("is_lab") else "")
 
-            def make_click(r=rec):
+            def make_click(r=rec, unmarked=is_unmarked):
                 def handler(e):
-                    open_edit_record_dialog(r, on_done=refresh_body)
+                    if unmarked:
+                        # Never logged - open the same picker used on the
+                        # Today view so this missed day can be backfilled.
+                        open_status_picker(
+                            r["date"],
+                            r["day_name"],
+                            r["time_slot"],
+                            r["subject"],
+                            f"{r['subject']} \u2014 {r['day_name']}, {r['date']}",
+                            on_done=refresh_body,
+                        )
+                    else:
+                        # Already logged - open the normal edit/delete dialog.
+                        open_edit_record_dialog(r, on_done=refresh_body)
 
                 return handler
 
@@ -686,8 +774,11 @@ def main(page: ft.Page):
                     margin=ft.Margin(16, 5, 16, 5),
                     padding=14,
                     border_radius=16,
-                    bgcolor=COLOR_CARD,
-                    border=ft.Border.all(1, COLOR_CARD_BORDER),
+                    bgcolor=COLOR_CARD if not is_unmarked else "#151018",
+                    border=ft.Border.all(
+                        1,
+                        COLOR_CARD_BORDER if not is_unmarked else "#2A2A32",
+                    ),
                     on_click=make_click(),
                     content=ft.Row(
                         [
@@ -703,9 +794,9 @@ def main(page: ft.Page):
                                         f"{rec['day_name']}, {rec['date']}",
                                         size=14,
                                         weight=ft.FontWeight.W_600,
-                                        color=COLOR_TEXT,
+                                        color=COLOR_TEXT if not is_unmarked else COLOR_SUBTEXT,
                                     ),
-                                    ft.Text(format_slot_label(start, end), size=12, color=COLOR_SUBTEXT),
+                                    ft.Text(slot_label, size=12, color=COLOR_SUBTEXT),
                                 ],
                                 spacing=2,
                                 expand=True,
@@ -713,10 +804,20 @@ def main(page: ft.Page):
                             ft.Container(
                                 padding=ft.Padding(10, 4, 10, 4),
                                 border_radius=20,
-                                bgcolor=ft.Colors.with_opacity(0.2, color),
-                                content=ft.Text(rec["status"], size=12, color=color, weight=ft.FontWeight.W_600),
+                                bgcolor=ft.Colors.with_opacity(0.14 if is_unmarked else 0.2, color),
+                                content=ft.Text(
+                                    rec["status"],
+                                    size=12,
+                                    color=color,
+                                    weight=ft.FontWeight.W_600,
+                                    italic=is_unmarked,
+                                ),
                             ),
-                            ft.Icon(ft.Icons.CHEVRON_RIGHT, color=COLOR_SUBTEXT, size=18),
+                            ft.Icon(
+                                ft.Icons.ADD_CIRCLE_OUTLINE if is_unmarked else ft.Icons.CHEVRON_RIGHT,
+                                color=COLOR_SUBTEXT,
+                                size=18,
+                            ),
                         ],
                         spacing=12,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -730,7 +831,7 @@ def main(page: ft.Page):
                     padding=30,
                     alignment=ft.Alignment.CENTER,
                     content=ft.Text(
-                        "No history yet for this subject.", color=COLOR_SUBTEXT
+                        "No classes scheduled for this subject yet.", color=COLOR_SUBTEXT
                     ),
                 )
             )

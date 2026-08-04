@@ -1,6 +1,5 @@
 name: Build BunkMarte APK
 
-# Trigger manually from the Actions tab, or on every push to main.
 on:
   workflow_dispatch:
   push:
@@ -22,7 +21,10 @@ jobs:
         run: pip install flet
 
       - name: Build Android APK
-        run: yes | flet build apk --project "BunkMarte"
+        # yes pipe bypasses the SDK download prompt
+        # split-per-abi drastically reduces the final APK size
+        # module-name tells Flet exactly which file to compile
+        run: yes | flet build apk --project "BunkMarte" --module-name app.py --split-per-abi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
