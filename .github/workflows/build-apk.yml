@@ -24,7 +24,7 @@ jobs:
         # yes pipe bypasses the SDK download prompt
         # split-per-abi drastically reduces the final APK size
         # module-name tells Flet exactly which file to compile
-        run: yes | flet build apk --project "BunkMarte" --module-name app.py --split-per-abi
+        run: yes | flet build apk --project "BunkMarte" --module-name main.py --split-per-abi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
